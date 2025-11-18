@@ -25,6 +25,8 @@ c-----------------------------------------------------------------------
 
       character*1  re2fle1(132)
       equivalence  (RE2FLE,re2fle1)
+      character*1  reafle1(132)
+      equivalence  (REAFLE,reafle1)
 
       ! set word size for REAL
       wdsize = sizeof(rtest)
@@ -52,6 +54,11 @@ c-----------------------------------------------------------------------
       call chcopy(re2fle1(lp+1),mesh_in,len(mesh_in))
       ls = lp + len(mesh_in)
       call blank(re2fle1(ls+1),len(re2fle)-ls)
+
+      lp = 0
+      call chcopy(reafle1(lp+1),mesh_in,len(mesh_in)) ! for co2
+      ls = lp + len(mesh_in)
+      call blank(reafle1(ls+1),len(reafle)-ls)
 
       call nekrs_registerPtr('ndim', ndim)
       call nekrs_registerPtr('nelv', nelv)
@@ -100,6 +107,12 @@ c-----------------------------------------------------------------------
       call nekrs_registerPtr('gettr', gettr)
       call nekrs_registerPtr('gtpsr', gtpsr(1))
 
+      call nekrs_registerPtr('nelgr', nelgr)
+      call nekrs_registerPtr('nhref', nhref)
+      call nekrs_registerPtr('hrefcuts', hrefcuts)
+      call nekrs_registerPtr('nhrefrs', nhrefrs)
+      call nekrs_registerPtr('hrefcutsrs', hrefcutsrs)
+
       call nekrs_registerPtr('npsr', npsr)
 
       call nekrs_registerPtr('out_mask', out_mask)
@@ -109,7 +122,7 @@ c-----------------------------------------------------------------------
       return
       end
 c-----------------------------------------------------------------------
-      subroutine nekf_setup(ifflow_in, 
+      subroutine nekf_setup(ifflow_in, hrefine, hrefineSize,
      $                      bIDMap, bIDMapSize, bIDtMap, bIDtMapSize,
      $                      npscal_in, idpss_in, p32, mpart, contol,
      $                      rho, mue, rhoCp, lambda, stsform) 
@@ -118,6 +131,9 @@ c-----------------------------------------------------------------------
       include 'TOTAL'
       include 'DOMAIN'
       include 'NEKINTF'
+
+      integer hrefineSize
+      integer hrefine(hrefineSize)
 
       integer bIDMapSize
       integer bIDtMapSize
@@ -185,15 +201,16 @@ c-----------------------------------------------------------------------
         write(6,*) 'bIDtMap', bIDtMap
       endif
 #endif
+      call ifill(boundaryID, -1, 6*lelv)
+      call ifill(boundaryIDt, -1, 6*lelt)
 
       ifld_bId = 2
       if(ifflow) ifld_bId = 1
       do iel = 1,nelv
       do ifc = 1,2*ndim
-         boundaryID(ifc,iel) = -1
          if(bc(5,ifc,iel,ifld_bId).gt.0) then
            boundaryID(ifc,iel) = bc(5,ifc,iel,ifld_bId)
-           idx = ibsearch(bIDMap, bIDMapSize, bc(5,ifc,iel,ifld_bId))
+           idx = lsearch_ur(bIDMap, bIDMapSize, boundaryID(ifc,iel))
            if(idx.gt.0) then
              boundaryID(ifc,iel) = idx 
            endif
@@ -205,10 +222,9 @@ c-----------------------------------------------------------------------
       if(nelgt.ne.nelgv) then 
         do iel = 1,nelt
         do ifc = 1,2*ndim
-         boundaryIDt(ifc,iel) = -1
          if(bc(5,ifc,iel,2).gt.0) then
            boundaryIDt(ifc,iel) = bc(5,ifc,iel,2)
-           idx = ibsearch(bIDtMap, bIDtMapSize, bc(5,ifc,iel,2))
+           idx = lsearch_ur(bIDtMap, bIDtMapSize, boundaryIDt(ifc,iel))
            if(idx.gt.0) then 
              boundaryIDt(ifc,iel) = idx
            endif
@@ -239,6 +255,10 @@ c-----------------------------------------------------------------------
       call gengeom(igeom)  ! Generate geometry, after usrdat 
 
       if(nio.eq.0) write(6,*) 'call usrdat2'
+      do iref=1,hrefineSize
+        call h_refine_usrdat2(hrefine(iref))
+        call fix_geom
+      enddo
       call usrdat2
       if(nio.eq.0) write(6,'(A,/)') ' done :: usrdat2' 
 
@@ -1140,7 +1160,7 @@ c     Interpolate xm(m,m,m,...) to xn(n,n,n,...) (GLL-->GLL)
       return
       end
 c-----------------------------------------------------------------------
-      subroutine nekf_openfld(fname_in, time_, p0th_)
+      subroutine nekf_openfld(fname_in, time_, p0th_, icrrs, lbrst_)
       include 'mpif.h'
       include 'SIZE'
       include 'TOTAL'
@@ -1151,11 +1171,13 @@ c-----------------------------------------------------------------------
       real time_
       real p0th_
 
-      integer nps_
+      integer nps_, icrrs_, lbrst_
 
       character*132  fname
       character*1    fnam1(132)
       equivalence   (fnam1,fname)
+
+      common /nekf_rfname/ fname 
 
       character*1    frontc
 
@@ -1179,6 +1201,7 @@ c-----------------------------------------------------------------------
 
       time_ = timer
       p0th_ = p0th
+      nelgr_ = nelgr
 
       ! what fields exist in file
       getxr = 1
@@ -1198,10 +1221,17 @@ c-----------------------------------------------------------------------
         if (.not. ifgtpsr(i)) gtpsr(i) = 0
       enddo
 
+      ifcrrs = .true.
+      if (icrrs.eq.0) ifcrrs = .false.
+
+      lbrst = min(1024,lelt)
+      if (lbrst_.gt.0) lbrst = lbrst_
+
       return
       end
 c-----------------------------------------------------------------------
-      subroutine nekf_readfld(xm1_,ym1_,zm1_,vx_,vy_,vz_,pm1_,t_,ps_)
+      subroutine nekf_readfld(ifpi, 
+     $                        xm1_,ym1_,zm1_,vx_,vy_,vz_,pm1_,t_,ps_)
 
       include 'mpif.h'
       include 'SIZE'
@@ -1209,6 +1239,7 @@ c-----------------------------------------------------------------------
       include 'RESTART'
       include 'NEKINTF'
 
+      integer ifpi
       real xm1_(lx1,ly1,lz1,*), ym1_(lx1,ly1,lz1,*), zm1_(lx1,ly1,lz1,*)
       real vx_ (lx1,ly1,lz1,*), vy_ (lx1,ly1,lz1,*), vz_ (lx1,ly1,lz1,*)
       real pm1_(lx1,ly1,lz1,*)
@@ -1223,18 +1254,70 @@ c-----------------------------------------------------------------------
       integer   disp_unit
       integer*8 win_size
 
-#ifdef MPI
-      disp_unit = 4 
-      win_size  = int(disp_unit,8)*size(wk)
-      if (commrs .eq. MPI_COMM_NULL) then
-        call mpi_comm_dup(nekcomm,commrs,ierr)
-        call MPI_Win_create(wk,
-     $                      win_size,
-     $                      disp_unit,
-     $                      MPI_INFO_NULL,
-     $                      commrs,rsH,ierr)
+      character*132  fname
+      common /nekf_rfname/ fname 
 
-        if (ierr .ne. 0 ) call exitti('MPI_Win_allocate failed!$',0)
+      lbrst = lelt
+      ifcrrs = .false.
+
+      if (ifpi.eq.1) then 
+        call gfldr(fname)
+
+        ntot = nelt * nx1 * ny1 * nz1
+        if (ifgetxr) then
+          call copy(xm1_, xm1, ntot)
+          call copy(ym1_, ym1, ntot)
+          call copy(zm1_, zm1, ntot)
+        endif
+
+        if (ifgetur) then
+          call copy(vx_, vx, ntot)
+          call copy(vy_, vy, ntot)
+          call copy(vz_, vz, ntot)
+        endif
+
+        if (ifgetpr) then
+          call copy(pm1_, pr, ntot)
+        endif
+
+        if (ifgettr) then
+          call copy(t_, t, ntot)
+        endif
+
+        do k=1,npsr
+           call copy(ps_(1,1,1,1,k), t(1,1,1,1,k+1), ntot)
+        enddo
+
+        return
+      endif 
+
+#ifdef MPI
+      lbrst = min(lbrst, lelt)
+      if (lbrst.lt.nelt) then
+        if(nio.eq.0) write(*,*)'Batched restart with lbrst',lbrst,nelt
+      endif
+
+      call rzero(rst_etime,4) ! mpiio / pack / transfer / unpack
+
+      if (ifcrrs) then
+        call fgslib_crystal_setup(cr_mfi,nekcomm,np)
+      else
+        disp_unit = 4
+        win_size  = int(disp_unit,8)*size(wk)
+        if (lbrst.lt.nelt) then
+          win_size = int(disp_unit,8)*(7*lx1*ly1*lz1*lbrst)*(wdsize/4)
+        endif
+        if (commrs .eq. MPI_COMM_NULL) then
+          call mpi_comm_dup(nekcomm,commrs,ierr)
+          call MPI_Win_create(wk,
+     $                        win_size,
+     $                        disp_unit,
+     $                        MPI_INFO_NULL,
+     $                        commrs,rsH,ierr)
+
+          if (ierr .ne. 0 ) call exitti('MPI_Win_allocate failed!$',0)
+          call rzero(wk,lwk) ! avoid unexpected FE_INVALID
+        endif
       endif
 #endif
 
@@ -1287,5 +1370,30 @@ c-----------------------------------------------------------------------
       endif
       call err_chk(ierr,'Error closing restart file, in mfi.$')
 
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine nekf_hrefine_map_elements(hrefine, hrefineSize)
+      implicit none
+      integer hrefineSize, hrefine(hrefineSize)
+
+      call h_refine_remap_elem(hrefine, hrefineSize)
+
+      return
+      end
+c-----------------------------------------------------------------------
+      subroutine nekf_hrefine_readfld(xm1_,ym1_,zm1_,vx_,vy_,vz_
+     $                               ,pm1_,t_,ps_, hrefine, hrefineSize)
+      implicit none
+
+      integer hrefineSize, hrefine(hrefineSize)
+      real xm1_(*), ym1_(*), zm1_(*)
+      real vx_ (*), vy_ (*), vz_ (*)
+      real pm1_(*)
+      real t_  (*)
+      real ps_ (*)
+
+      call h_refine_readfld(xm1_,ym1_,zm1_,vx_,vy_,vz_
+     $                     ,pm1_,t_,ps_, hrefine, hrefineSize)
       return
       end

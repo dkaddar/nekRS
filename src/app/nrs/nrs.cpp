@@ -176,7 +176,7 @@ void nrs_t::init()
   if (meshTRequested) {
     int nelgt, nelgv;
     const std::string meshFile = platform->options.getArgs("MESH FILE");
-    re2::nelg(meshFile, nelgt, nelgv, platform->comm.mpiComm());
+    re2::nelg(meshFile, false, nelgt, nelgv, platform->comm.mpiComm());
 
     nekrsCheck(nelgt == nelgv,
                platform->comm.mpiComm(),
@@ -526,6 +526,19 @@ void nrs_t::restartFromFiles(const std::vector<std::string> &fileList)
       return found;
     }();
 
+/*    auto hRefine = [&]() {
+      auto it = std::find_if(options.begin(), options.end(), [](const std::string &s) {
+        return s.find("href") != std::string::npos;
+      });
+
+      std::string val;
+      if (it != options.end()) {
+        val = serializeString(*it, '=').at(1);
+        options.erase(it);
+      }
+      return val;
+    }();*/
+
     const auto requestedFields = [&]() {
       std::vector<std::string> flds;
       for (const auto &entry : {"x", "u", "p", "t", "s"}) {
@@ -639,6 +652,11 @@ void nrs_t::restartFromFiles(const std::vector<std::string> &fileList)
       iofld->readAttribute("interpolate", "true");
     }
 
+    std::string hSchedule;
+    if (platform->options.getArgs("MESH HREFINEMENT SCHEDULE", hSchedule)) {
+      iofld->readAttribute("hSchedule", hSchedule);
+    }
+
     iofld->process();
     iofld->close();
 
@@ -659,11 +677,10 @@ void nrs_t::setIC()
   }
 
   if (!platform->options.getArgs("RESTART FILE NAME").empty()) {
-    std::string restartStr;
-    platform->options.getArgs("RESTART FILE NAME", restartStr);
-    std::vector<std::string> fileList = serializeString(restartStr, ',');
+    std::vector<std::string> list;
+    platform->options.getArgs("RESTART FILE NAME", list, ",");
 
-    restartFromFiles(fileList);
+    restartFromFiles(list);
   }
 
   double startTime;
@@ -1245,6 +1262,11 @@ void nrs_t::writeCheckpoint(double t, bool enforceOutXYZ, bool enforceFP64, int 
   checkpointWriter->writeAttribute("precision", (FP64) ? "64" : "32");
   checkpointWriter->writeAttribute("uniform", (uniform) ? "true" : "false");
   checkpointWriter->writeAttribute("outputMesh", (outXYZ) ? "true" : "false");
+
+  std::string hSchedule;
+  if (platform->options.getArgs("MESH HREFINEMENT SCHEDULE", hSchedule)) {
+    checkpointWriter->writeAttribute("hSchedule", hSchedule);
+  }
 
   checkpointWriter->addVariable("time", t);
 

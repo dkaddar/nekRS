@@ -53,7 +53,7 @@ void iofldNek::openEngine()
       std::cout << "reading checkpoint ..." << std::endl;
       std::cout << " fileName: " << fileName << std::endl << std::flush;
     }
-    fldData = nek::openFld(fileName, _availableVariables);
+    fldData = nek::openFld(fileName, _availableVariables, hRefineScheduleFld);
   }
 }
 
@@ -110,9 +110,8 @@ size_t iofldNek::write()
       return count;
     }();
 
-    const auto isStart = (data.o_t.size() > 0) ? 1 : 0;
     for (int is = 0; is < Nscalar; is++) {
-      if (auto o_buf = inquireVariable<std::vector<occa::memory>>("scalar" + scalarDigitStr(isStart + is))) {
+      if (auto o_buf = inquireVariable<std::vector<occa::memory>>("scalar" + scalarDigitStr(is))) {
         data.o_s.push_back(o_buf->get());
       }
     }
@@ -124,6 +123,7 @@ size_t iofldNek::write()
                 data,
                 (precision == 64) ? true : false,
                 elementMask,
+                hRefineScheduleSim,
                 (N > 0) ? N : mesh->N,
                 uniform);
 
@@ -144,13 +144,15 @@ size_t iofldNek::write()
 
 size_t iofldNek::read()
 {
-  nekrsCheck(pointInterpolation,
+  hRefineDiffSchedule(mesh->NelementsGlobal, fldData.nelgr);
+
+  nekrsCheck(pointInterpolation && hRefineScheduleApply.size() > 0,
              MPI_COMM_SELF,
              EXIT_FAILURE,
              "%s\n",
-             "read attribute interpolate not supported!");
+             "read conflict: interpolate + h-refine restart not supported!");
 
-  nek::readFld(fldData);
+  nek::readFld(fldData, pointInterpolation, hRefineScheduleApply);
 
   if (auto time = inquireVariable<double>("time")) {
     time->get() = fldData.time;
